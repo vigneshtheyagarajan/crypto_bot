@@ -11,8 +11,9 @@ CROSS_LOOKBACK  = 5       # crossover valid if it happened within last N candles
 
 RSI_BUY_MIN  = 35
 RSI_BUY_MAX  = 65
-RSI_SELL_MIN = 35
+RSI_SELL_MIN = 50   # raised from 35: only short when RSI shows actual overextension
 RSI_SELL_MAX = 65
+TREND_EMA    = 50   # price must be above/below this EMA to confirm trend direction
 
 
 def get_historical_data(symbol, interval=Client.KLINE_INTERVAL_5MINUTE, limit=100):
@@ -29,11 +30,32 @@ def get_historical_data(symbol, interval=Client.KLINE_INTERVAL_5MINUTE, limit=10
 
 
 def add_indicators(df):
-    """Add EMA9, EMA21 and RSI14."""
+    """Add EMA9, EMA21, EMA50 and RSI14."""
     df["ema9"]  = ta.trend.ema_indicator(df["Close"], window=9)
     df["ema21"] = ta.trend.ema_indicator(df["Close"], window=21)
+    df["ema50"] = ta.trend.ema_indicator(df["Close"], window=TREND_EMA)
     df["rsi"]   = ta.momentum.rsi(df["Close"], window=14)
     return df
+
+
+def get_btc_trend():
+    """
+    Return True if BTCUSDT is in a macro uptrend (EMA9 > EMA21), False if bearish.
+    Uses 15-min candles so the signal is stable — 5-min crosses flip too fast
+    during choppy/sideways markets and let losing trades through.
+    Falls back to True (allow trades) on any error so the bot doesn't freeze.
+    """
+    try:
+        df = get_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_15MINUTE, limit=100)
+        df["ema9"]  = ta.trend.ema_indicator(df["Close"], window=9)
+        df["ema21"] = ta.trend.ema_indicator(df["Close"], window=21)
+        df.dropna(inplace=True)
+        if len(df) < 2:
+            return True
+        latest = df.iloc[-1]
+        return float(latest["ema9"]) > float(latest["ema21"])
+    except Exception:
+        return True
 
 
 def get_signal(symbol):
@@ -42,13 +64,15 @@ def get_signal(symbol):
 
     Signal logic:
     ─────────────
-    BUY  : EMA9 crossed ABOVE EMA21 within last 3 candles AND gap ≥ 0.1% AND RSI 35–65
-    SELL : EMA9 crossed BELOW EMA21 within last 3 candles AND gap ≥ 0.1% AND RSI 35–65
+    BUY  : EMA9 crossed ABOVE EMA21 within last N candles AND gap ≥ 0.05%
+           AND price > EMA50 (uptrend) AND RSI 35–65
+    SELL : EMA9 crossed BELOW EMA21 within last N candles AND gap ≥ 0.05%
+           AND price < EMA50 (downtrend) AND RSI 50–65
     """
     try:
         df = get_historical_data(symbol)
 
-        if len(df) < 22:
+        if len(df) < 51:
             return {"symbol": symbol, "error": "Not enough data", "signal": "HOLD"}
 
         df = add_indicators(df)
@@ -63,6 +87,7 @@ def get_signal(symbol):
         price = round(float(latest["Close"]), 6)
         ema9  = round(float(latest["ema9"]),  6)
         ema21 = round(float(latest["ema21"]), 6)
+        ema50 = round(float(latest["ema50"]), 6)
         rsi   = round(float(latest["rsi"]),   2)
 
         # ── EMA gap filter: trend must be meaningful now ──────────────────────
@@ -91,10 +116,14 @@ def get_signal(symbol):
             for i in range(1, len(tail))
         )
 
-        # ── Signal with RSI confirmation ──────────────────────────────────────
-        if bull_cross and ema9 > ema21 and RSI_BUY_MIN < rsi < RSI_BUY_MAX:
+        # ── Signal with RSI + EMA50 trend confirmation ────────────────────────
+        # EMA50 filter: only buy in uptrends (price > EMA50) and
+        # only sell in downtrends (price < EMA50) to avoid counter-trend entries
+        if (bull_cross and ema9 > ema21 and price > ema50
+                and RSI_BUY_MIN < rsi < RSI_BUY_MAX):
             signal = "BUY"
-        elif bear_cross and ema9 < ema21 and RSI_SELL_MIN < rsi < RSI_SELL_MAX:
+        elif (bear_cross and ema9 < ema21 and price < ema50
+                and RSI_SELL_MIN < rsi < RSI_SELL_MAX):
             signal = "SELL"
         else:
             signal = "HOLD"
@@ -104,6 +133,7 @@ def get_signal(symbol):
             "price":       price,
             "ema9":        ema9,
             "ema21":       ema21,
+            "ema50":       ema50,
             "rsi":         rsi,
             "ema_gap_pct": round(ema_gap_pct * 100, 3),
             "signal":      signal,

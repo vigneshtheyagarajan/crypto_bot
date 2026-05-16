@@ -10,11 +10,8 @@ RISK_PER_TRADE_PCT        = 0.01   # 1% of capital = max risk per trade
 SL_PCT                    = 0.01   # 1% stop loss distance from entry
 TARGET_RATIO              = 2.0    # 2:1 reward to risk
 MAX_CAPITAL_PER_TRADE_PCT = 0.25   # max 25% of total capital in one trade
-TRAIL_STOP_TRIGGER_PCT    = 0.005  # start trailing at 0.5% profit
+TRAIL_STOP_TRIGGER_PCT    = 0.010  # start trailing at 1.0% profit (raised from 0.5%)
 TRAIL_STOP_DISTANCE_PCT   = 0.003  # trail at 0.3% distance from current price
-
-daily_loss = 0.0
-
 
 # ── Capital ───────────────────────────────────────────────────────────────────
 
@@ -130,21 +127,10 @@ def update_trailing_stop(trade: dict, current_price: float) -> dict:
 
 # ── Circuit breaker ───────────────────────────────────────────────────────────
 
-def is_circuit_breaker_hit(capital):
-    global daily_loss
+def is_circuit_breaker_hit(capital, daily_pnl):
     limit = capital * DAILY_LOSS_LIMIT_PCT
-    if daily_loss <= -limit:
-        print(f"🔴 Circuit breaker: daily loss ${abs(daily_loss):.2f} "
+    if daily_pnl <= -limit:
+        print(f"🔴 Circuit breaker: daily loss ${abs(daily_pnl):.2f} "
               f"exceeded limit ${limit:.2f}")
         return True
     return False
-
-
-def record_loss(amount):
-    global daily_loss
-    daily_loss -= abs(amount)
-
-
-def reset_daily_loss():
-    global daily_loss
-    daily_loss = 0.0

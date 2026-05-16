@@ -27,12 +27,12 @@ sys.stderr     = _Tee(sys.__stderr__, _log_file)
 
 from binance.client import Client
 from config import API_KEY, API_SECRET
-from strategy import get_signal
+from strategy import get_signal, get_btc_trend
 
 _binance = Client(API_KEY, API_SECRET)
 from risk_manager import (get_capital, calculate_position,
                           update_trailing_stop,
-                          is_circuit_breaker_hit, record_loss, reset_daily_loss,
+                          is_circuit_breaker_hit,
                           place_order)
 from notifier import (notify_bot_started, notify_paper_trade, notify_order_placed,
                       notify_circuit_breaker, notify_max_trades,
@@ -72,15 +72,19 @@ WATCHLIST = [
 ]
 
 # ── Bot settings ──────────────────────────────────────────────────────────────
-SCAN_INTERVAL    = 60    # seconds between scans
-MAX_TRADES       = 5     # max concurrent open trades
-MIN_USDT_TRADE   = 10    # minimum USDT per trade (Binance minimum is ~$10)
-COOLDOWN_MINUTES = 30    # don't re-trade same symbol within this many mins
+SCAN_INTERVAL      = 60    # seconds between scans
+MAX_TRADES         = 5     # max concurrent open trades
+MIN_USDT_TRADE     = 10    # minimum USDT per trade (Binance minimum is ~$10)
+COOLDOWN_MINUTES   = 30    # don't re-trade same symbol within this many mins
+BTC_CONFIRM_SCANS  = 3     # BTC must be ↑ this many consecutive scans before entries resume
 
 # ── Trading mode ──────────────────────────────────────────────────────────────
 # IS_LIVE = False  →  paper trading (no real orders placed)
 # IS_LIVE = True   →  live trading  (real orders on Binance)
 IS_LIVE = False
+
+# Skip SELL signals in paper mode so paper P&L mirrors live (BUY-only spot) behaviour
+PAPER_BUY_ONLY = True
 
 STATE_FILE = "logs/state.json"
 
@@ -91,6 +95,7 @@ daily_pnl          = 0.0
 deployed_usdt      = 0.0
 max_trades_alerted = False
 symbol_cooldown    = {}
+btc_consecutive_up = 0     # how many consecutive scans BTC has been ↑
 
 
 def now_utc():
@@ -182,9 +187,9 @@ def print_summary(capital):
     print(f"   Capital          : ${capital:,.2f} USDT")
     print(f"   Deployed         : ${deployed_usdt:,.2f} USDT")
     print(f"   Available        : ${available_capital(capital):,.2f} USDT")
-    print(f"   Open positions   : {trades_today} / {MAX_TRADES}")
+    print(f"   Trades today     : {trades_today} total entered")
+    print(f"   Currently open   : {list(open_trades.keys()) or 'None'} ({len(open_trades)}/{MAX_TRADES})")
     print(f"   Daily P&L        : ${daily_pnl:+.4f} USDT")
-    print(f"   Open positions   : {list(open_trades.keys()) or 'None'}")
     print(f"   Log file         : {_log_path}")
     print("─" * 55)
     print_win_rate()
@@ -194,7 +199,7 @@ def print_summary(capital):
 
 def run_bot():
     global trades_today, open_trades, daily_pnl, deployed_usdt
-    global max_trades_alerted, symbol_cooldown
+    global max_trades_alerted, symbol_cooldown, btc_consecutive_up
 
     print("\n" + "═" * 55)
     print(f"🤖  CRYPTO BOT STARTED  "
@@ -203,7 +208,6 @@ def run_bot():
     print("═" * 55)
 
     init_log()
-    reset_daily_loss()
 
     trades_today       = 0
     open_trades        = {}
@@ -211,6 +215,7 @@ def run_bot():
     deployed_usdt      = 0.0
     max_trades_alerted = False
     symbol_cooldown    = {}
+    btc_consecutive_up = 0
 
     load_state()
 
@@ -226,10 +231,13 @@ def run_bot():
     print(f"⚡ Daily loss limit     : ${capital * 0.03:,.2f}  (3%)")
     print(f"⚡ Risk per trade       : ${capital * 0.01:,.2f}  (1%)")
     print(f"📊 EMA gap filter       : 0.05% minimum")
+    print(f"📊 BTC macro filter     : BUY only when BTC EMA9 > EMA21 (uptrend)")
     print(f"📊 RSI for BUY          : 35 – 65")
-    print(f"📊 RSI for SELL         : 35 – 65")
-    print(f"🔒 Trail stop trigger   : 0.5% profit from entry")
+    print(f"📊 RSI for SELL         : 50 – 65  (+ price < EMA50 trend filter)")
+    print(f"🔒 Trail stop trigger   : 1.0% profit from entry")
     print(f"🔒 Trail stop distance  : 0.3% below/above current price")
+    if not IS_LIVE and PAPER_BUY_ONLY:
+        print(f"📋 Paper mode           : BUY-only (SELL signals skipped)")
     print(f"🕐 Current UTC time     : {now_utc().strftime('%H:%M:%S')}\n")
 
     notify_bot_started(capital, WATCHLIST)
@@ -249,17 +257,17 @@ def run_bot():
             send_win_rate_to_telegram()
             print_summary(capital)
 
-            trades_today       = len(open_trades)   # keep concurrent count accurate
+            trades_today       = 0
             daily_pnl          = 0.0
             max_trades_alerted = len(open_trades) >= MAX_TRADES
             symbol_cooldown    = {}
+            btc_consecutive_up = 0
             last_reset_day     = now.day
-            reset_daily_loss()
             save_state()
             # Note: open_trades are NOT reset — crypto holds positions across days
 
         # 2. Circuit breaker (3% daily loss limit)
-        if is_circuit_breaker_hit(capital):
+        if is_circuit_breaker_hit(capital, daily_pnl):
             print("🔴 CIRCUIT BREAKER — All new trades stopped for today.")
             notify_circuit_breaker(capital, daily_pnl, trades_today)
             print_summary(capital)
@@ -278,13 +286,14 @@ def run_bot():
             continue
 
         # 3. Max trades — monitor only
-        if trades_today >= MAX_TRADES:
+        if len(open_trades) >= MAX_TRADES:
             if not max_trades_alerted:
                 notify_max_trades(MAX_TRADES)
                 max_trades_alerted = True
             print(f"⏸  [{now.strftime('%H:%M')} UTC] "
                   f"Max {MAX_TRADES} concurrent positions — monitoring only | "
-                  f"Available:${avail:,.2f}")
+                  f"open:{len(open_trades)}/{MAX_TRADES} | "
+                  f"Avail:${avail:,.2f} | P&L:{daily_pnl:+.4f}")
             if open_trades:
                 for symbol in list(open_trades.keys()):
                     price = get_current_price(symbol)
@@ -312,7 +321,6 @@ def run_bot():
                 closed_count = prev_count - len(open_trades)
                 if freed > 0:
                     deployed_usdt = max(0.0, deployed_usdt - freed)
-                    trades_today  = max(0, trades_today - closed_count)
                     daily_pnl    += pnl_delta
                     save_state()
                     print(f"   💰 Capital freed: ${freed:,.2f} | Now available: "
@@ -324,7 +332,8 @@ def run_bot():
         if open_trades:
             print(f"\n👁  Monitoring {len(open_trades)} open trade(s) | "
                   f"Deployed:${deployed_usdt:,.2f} | "
-                  f"Available:${avail:,.2f} ...")
+                  f"Avail:${avail:,.2f} | "
+                  f"P&L:{daily_pnl:+.4f} ...")
 
             for symbol in list(open_trades.keys()):
                 price = get_current_price(symbol)
@@ -359,15 +368,30 @@ def run_bot():
         # 5. Skip scan if no capital
         if avail < MIN_USDT_TRADE:
             print(f"⏸  [{now.strftime('%H:%M')} UTC] "
-                  f"No free capital — waiting | Deployed:${deployed_usdt:,.2f}")
+                  f"No free capital — waiting | Deployed:${deployed_usdt:,.2f} | P&L:{daily_pnl:+.4f}")
             time.sleep(SCAN_INTERVAL)
             continue
 
         # 6. Scan watchlist
+        btc_uptrend = get_btc_trend()
+        if btc_uptrend:
+            btc_consecutive_up += 1
+        else:
+            btc_consecutive_up = 0
+        btc_confirmed = btc_uptrend and btc_consecutive_up >= BTC_CONFIRM_SCANS
+        if btc_uptrend and not btc_confirmed:
+            btc_tag = f"BTC:↑ (confirming {btc_consecutive_up}/{BTC_CONFIRM_SCANS})"
+        elif btc_confirmed:
+            btc_tag = "BTC:↑"
+        else:
+            btc_tag = "BTC:↓ (BUY blocked)"
         print(f"\n🔍 Scanning {len(WATCHLIST)} pairs at "
               f"{now.strftime('%H:%M:%S')} UTC "
-              f"[open:{trades_today}/{MAX_TRADES} | "
-              f"available:${avail:,.2f}] ...")
+              f"[open:{len(open_trades)}/{MAX_TRADES} | "
+              f"today:{trades_today} | "
+              f"avail:${avail:,.2f} | "
+              f"P&L:{daily_pnl:+.4f} | "
+              f"{btc_tag}] ...")
 
         for symbol in WATCHLIST:
 
@@ -432,8 +456,18 @@ def run_bot():
                   f"{arrow} {result['signal']}")
 
             # ── Act on signal ─────────────────────────────────────────────────
-            if IS_LIVE and result["signal"] == "SELL":
-                print(f"   {symbol:14s} — ⏭  SELL skipped (spot-only live mode)")
+            if result["signal"] == "SELL":
+                if IS_LIVE:
+                    print(f"   {symbol:14s} — ⏭  SELL skipped (spot-only live mode)")
+                    continue
+                if PAPER_BUY_ONLY:
+                    print(f"   {symbol:14s} — ⏭  SELL skipped (paper BUY-only mode)")
+                    continue
+
+            if result["signal"] == "BUY" and not btc_confirmed:
+                reason = ("BTC downtrend" if not btc_uptrend
+                          else f"BTC trend not confirmed yet ({btc_consecutive_up}/{BTC_CONFIRM_SCANS} scans)")
+                print(f"   {symbol:14s} — ⏭  BUY skipped ({reason})")
                 continue
 
             if result["signal"] in ("BUY", "SELL"):
@@ -490,7 +524,7 @@ def run_bot():
 
                 print(f"      💸 Deployed:${deployed_usdt:,.2f} | Remaining:${avail:,.2f}")
 
-                if trades_today >= MAX_TRADES:
+                if len(open_trades) >= MAX_TRADES:
                     print(f"   🛑 Max {MAX_TRADES} concurrent positions reached — stopping scan")
                     break
 
