@@ -96,4 +96,4 @@ python3 backtest/fetch_data.py --start 2025-11 --end 2026-10   # public data, no
 python3 backtest/experiments.py > backtest_data/results.json
 ```
 
-See `backtest/RESULTS.md` for the latest results.
+See `backtest/RESULTS.md` for the current bot and `backtest/STRATEGIES.md` for lower-frequency alternatives (`python3 backtest/strategies.py backtest_data`).
