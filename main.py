@@ -33,7 +33,7 @@ _binance = Client(API_KEY, API_SECRET)
 from risk_manager import (get_capital, calculate_position,
                           update_trailing_stop,
                           is_circuit_breaker_hit,
-                          place_order)
+                          get_live_broker)
 from notifier import (notify_bot_started, notify_paper_trade, notify_order_placed,
                       notify_circuit_breaker, notify_max_trades,
                       notify_daily_summary, notify_crash)
@@ -116,7 +116,7 @@ def is_on_cooldown(symbol):
     last = symbol_cooldown.get(symbol)
     if not last:
         return False, 0
-    elapsed = (now_utc() - last).seconds / 60
+    elapsed = (now_utc() - last).total_seconds() / 60
     if elapsed < COOLDOWN_MINUTES:
         return True, int(COOLDOWN_MINUTES - elapsed)
     return False, 0
@@ -136,8 +136,10 @@ def save_state():
         },
         "saved_at": now_utc().isoformat(),
     }
-    with open(STATE_FILE, "w") as f:
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(state, f, indent=2)
+    os.replace(tmp, STATE_FILE)   # atomic: a crash mid-write can't corrupt it
 
 
 def load_state():
@@ -148,17 +150,20 @@ def load_state():
         with open(STATE_FILE) as f:
             state = json.load(f)
         saved_at = datetime.fromisoformat(state["saved_at"])
-        if saved_at.date() != now_utc().date():
-            print("📂 State file is from a previous day — starting fresh.")
-            return
+        # Open positions are real coins: always restore them, whatever day the
+        # state was saved. Only the daily counters reset on a new UTC day.
         open_trades   = state.get("open_trades", {})
         deployed_usdt = state.get("deployed_usdt", 0.0)
-        trades_today  = state.get("trades_today", 0)
-        daily_pnl     = state.get("daily_pnl", 0.0)
-        symbol_cooldown = {
-            sym: datetime.fromisoformat(ts)
-            for sym, ts in state.get("symbol_cooldown", {}).items()
-        }
+        if saved_at.date() != now_utc().date():
+            print("📂 State file is from a previous day — keeping open trades, "
+                  "resetting daily counters.")
+        else:
+            trades_today  = state.get("trades_today", 0)
+            daily_pnl     = state.get("daily_pnl", 0.0)
+            symbol_cooldown = {
+                sym: datetime.fromisoformat(ts)
+                for sym, ts in state.get("symbol_cooldown", {}).items()
+            }
         if open_trades:
             print(f"📂 Restored {len(open_trades)} open trade(s): "
                   f"{list(open_trades.keys())}")
@@ -200,6 +205,11 @@ def print_summary(capital):
 def run_bot():
     global trades_today, open_trades, daily_pnl, deployed_usdt
     global max_trades_alerted, symbol_cooldown, btc_consecutive_up
+
+    if IS_LIVE:
+        # Backtest (backtest/RESULTS.md): this strategy lost money in every
+        # month of Nov 2025 to Oct 2026 after fees. Live trading is blocked.
+        sys.exit("Live trading is disabled for this strategy. See backtest/RESULTS.md.")
 
     print("\n" + "═" * 55)
     print(f"🤖  CRYPTO BOT STARTED  "
@@ -489,19 +499,30 @@ def run_bot():
                 print(f"   {'─'*51}\n")
 
                 if IS_LIVE:
-                    order = place_order(symbol, result["signal"], pos["usdt_amount"])
-                    order_id = str(order["orderId"])
-                    notify_order_placed(symbol, result["signal"], pos["qty"],
-                                        result["price"], pos["usdt_amount"], order_id)
+                    # A rejected or failed order must not crash the bot: every
+                    # other open position depends on this loop for its stop.
+                    try:
+                        fill = get_live_broker().buy(symbol, pos["usdt_amount"])
+                    except Exception as e:
+                        print(f"   ❌ BUY {symbol} failed, skipping: {e}")
+                        notify_crash(f"BUY {symbol} failed (bot still running): {e}")
+                        continue
+                    # Track the real fill, not the scanned price and sized qty.
+                    live_pos = calculate_position(capital, fill.avg_price, "BUY")
+                    live_pos["qty"]         = fill.base_qty
+                    live_pos["usdt_amount"] = fill.quote_qty
+                    notify_order_placed(symbol, "BUY", fill.base_qty,
+                                        fill.avg_price, fill.quote_qty, fill.order_id)
                     open_trades[symbol] = {
-                        "order_id": order_id,
-                        "signal":   result["signal"],
-                        "entry":    result["price"],
-                        "rsi":      result["rsi"],
-                        "usdt_used": pos["usdt_amount"],
-                        "trailing": False,
-                        **pos
+                        "order_id":  fill.order_id,
+                        "signal":    "BUY",
+                        "entry":     fill.avg_price,
+                        "rsi":       result["rsi"],
+                        "usdt_used": fill.quote_qty,
+                        "trailing":  False,
+                        **live_pos
                     }
+                    pos = live_pos
                 else:
                     notify_paper_trade(symbol, result["signal"], result["price"],
                                        pos["qty"], pos["stop_loss"], pos["target"],

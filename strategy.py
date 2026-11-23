@@ -43,7 +43,8 @@ def get_btc_trend():
     Return True if BTCUSDT is in a macro uptrend (EMA9 > EMA21), False if bearish.
     Uses 15-min candles so the signal is stable — 5-min crosses flip too fast
     during choppy/sideways markets and let losing trades through.
-    Falls back to True (allow trades) on any error so the bot doesn't freeze.
+    Returns False (block new BUYs) on any error: missing data must not
+    switch the filter off.
     """
     try:
         df = get_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_15MINUTE, limit=100)
@@ -51,11 +52,11 @@ def get_btc_trend():
         df["ema21"] = ta.trend.ema_indicator(df["Close"], window=21)
         df.dropna(inplace=True)
         if len(df) < 2:
-            return True
+            return False
         latest = df.iloc[-1]
         return float(latest["ema9"]) > float(latest["ema21"])
     except Exception:
-        return True
+        return False
 
 
 def get_signal(symbol):

@@ -2,3 +2,5 @@
 /.env
 /logs/backtest_data
 __pycache__/
+.pytest_cache/
+logs/

@@ -85,6 +85,19 @@ def place_order(symbol, side, usdt_amount):
     return order
 
 
+_live_broker = None
+
+
+def get_live_broker():
+    """Order layer with fill tracking, LOT_SIZE rounding and client order ids.
+    Prefer this over place_order(), which sizes sells in USDT."""
+    global _live_broker
+    if _live_broker is None:
+        from execution import LiveBroker
+        _live_broker = LiveBroker(client)
+    return _live_broker
+
+
 # ── Trailing stop ─────────────────────────────────────────────────────────────
 
 def update_trailing_stop(trade: dict, current_price: float) -> dict:
