@@ -86,3 +86,14 @@ Each run creates:
 - `logs/bot_YYYY-MM-DD_HH-MM-SS.log` — full terminal output
 - `logs/trade_log_YYYY-MM-DD_HH-MM-SS.csv` — closed trade history with P&L
 - `logs/state.json` — live state snapshot for restart recovery
+
+## Backtesting
+
+`backtest/` replays the bot's entry and exit rules on historical Binance 1-minute data, with fees, slippage and the 60-second polling of stops.
+
+```bash
+python3 backtest/fetch_data.py --start 2025-11 --end 2026-10   # public data, no API key
+python3 backtest/experiments.py > backtest_data/results.json
+```
+
+See `backtest/RESULTS.md` for the latest results.
