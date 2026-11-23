@@ -37,6 +37,12 @@ from datetime import datetime, timezone
 
 from execution import PaperBroker, OrderError, retry, FEE, SLIPPAGE
 
+try:  # load .env before reading settings below
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 SYMBOL = "BTCUSDT"
 SMA_DAYS = int(os.getenv("TREND_SMA_DAYS", "20"))
 CHECK_INTERVAL = int(os.getenv("TREND_CHECK_INTERVAL", "300"))      # seconds
@@ -266,11 +272,6 @@ def main(argv=None):
     if TRADING_MODE != "paper":
         sys.exit(LIVE_DISABLED_MSG)
 
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except Exception:
-        pass
     os.makedirs(LOG_DIR, exist_ok=True)
     state = load_state()
 
