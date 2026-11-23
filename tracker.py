@@ -57,7 +57,7 @@ def check_open_trades(open_trades: dict, get_price_fn,
 
     Returns (updated_open_trades, usdt_freed, closed_pnl).
     """
-    from risk_manager import place_order
+    from risk_manager import get_live_broker
 
     closed      = []
     usdt_freed  = 0.0
@@ -93,14 +93,23 @@ def check_open_trades(open_trades: dict, get_price_fn,
             if exit_price is not None:
                 pnl     = ((exit_price - entry) * qty if signal == "BUY"
                            else (entry - exit_price) * qty)
-                outcome = "WIN" if pnl > 0 else "LOSS"
 
                 if is_live and signal == "BUY":
+                    # Sell the coins actually held (capped at the free balance,
+                    # rounded to LOT_SIZE). If the sell fails, the trade stays
+                    # open so it is retried next loop instead of being orphaned.
                     try:
-                        order = place_order(symbol, "SELL", usdt_used)
-                        print(f"   ✅ LIVE sell order placed: {symbol} | ID:{order['orderId']}")
+                        fill = get_live_broker().sell(symbol, qty)
                     except Exception as e:
-                        print(f"   ❌ Failed to place sell order for {symbol}: {e}")
+                        print(f"   ❌ Sell failed for {symbol}, keeping trade open: {e}")
+                        _send(f"❌ <b>SELL FAILED — {symbol}</b>\n"
+                              f"Position is still open and will be retried.\n{str(e)[:200]}")
+                        continue
+                    print(f"   ✅ LIVE sell filled: {symbol} {fill.base_qty} @ {fill.avg_price}")
+                    exit_price = fill.avg_price
+                    pnl        = fill.quote_qty - usdt_used
+
+                outcome = "WIN" if pnl > 0 else "LOSS"
 
                 log_trade(symbol, signal, entry, stop, target,
                           exit_price, outcome, pnl, qty, rsi, usdt_used)
