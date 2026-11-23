@@ -41,6 +41,18 @@ def main():
         tr = run(data, p, PAPER_START, PAPER_END)
         out.setdefault("paper_week_replay", []).append(summarize(tr, p, f"13-18 May 2026, {mode}"))
 
+    # Month-by-month for the current settings, realistic costs.
+    tr = run(data, BASE, IS_START, OOS_END)
+    if not tr.empty:
+        m = tr.groupby(tr["exit_time"].dt.strftime("%Y-%m"))["pnl"].agg(["count", "sum"])
+        out["current_realistic_by_month"] = {k: {"trades": int(r["count"]), "pnl": round(float(r["sum"]), 2)}
+                                             for k, r in m.iterrows()}
+        out["current_realistic_by_symbol"] = {
+            s: {"trades": int(len(g)), "win_rate": round(float((g["pnl"] > 0).mean()), 3),
+                "pnl": round(float(g["pnl"].sum()), 2)}
+            for s, g in tr.groupby("symbol")}
+        tr.to_csv(os.path.join(data_dir, "trades_current_realistic.csv"), index=False)
+
     for name, p in VARIANTS.items():
         row = {"variant": name}
         for label, (s, e) in {"in_sample": (IS_START, SPLIT),

@@ -148,6 +148,9 @@ def run(data, p: Params, start=None, end=None):
     else:
         btc_ok = np.ones(len(grid), bool)
 
+    any_sig = np.zeros(len(grid), bool)
+    for s in syms:
+        any_sig |= S[s]
     day = grid.normalize().asi8
     open_t, trades = {}, []
     deployed = daily_pnl = 0.0
@@ -197,7 +200,7 @@ def run(data, p: Params, start=None, end=None):
         # entries
         if daily_pnl <= -p.capital * p.daily_loss_pct:
             halted = True
-        if halted or not btc_ok[i]:
+        if halted or not btc_ok[i] or not any_sig[i]:
             continue
         for sym in syms:
             if not S[sym][i] or sym in open_t:
